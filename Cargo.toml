@@ -1,0 +1,25 @@
+[workspace]
+members = [
+    "",
+    "delays_server",
+    "rt_macro"
+]
+default-members = ["rt_macro"]
+
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[features]
+macro = ["rt_macro"]
+
+[package]
+name = "cmoon"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mio = { version = "1.0.3", features = ["net", "os-poll"] }
+rt_macro = { path = "rt_macro", optional = true }
