@@ -10,6 +10,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
+        mpsc::channel,
     },
     task::{Context, Poll, Wake, Waker},
     thread,
@@ -28,17 +29,6 @@ struct ExecutorCore {
     tasks: RefCell<HashMap<usize, Task>>,
     ready_queue: Arc<Mutex<Vec<usize>>>,
     next_id: AtomicUsize,
-}
-
-pub fn spawn<F>(future: F)
-where
-    F: Future<Output = ()> + 'static,
-{
-    CURRENT_EXEC.with(|e| {
-        let id = e.next_id.fetch_add(1, Ordering::Relaxed);
-        e.tasks.borrow_mut().insert(id, Box::pin(future));
-        e.ready_queue.lock().map(|mut q| q.push(id)).unwrap();
-    });
 }
 
 pub struct Executor {}
@@ -82,14 +72,12 @@ impl Executor {
         let main_id = CURRENT_EXEC.with(|e| e.next_id.fetch_add(1, Ordering::Relaxed));
 
         // We need to keep track of the result
-        let result_cell = RefCell::new(None);
-        let result_cell = Arc::new(result_cell);
-        let result_cell_clone = result_cell.clone();
+        let (tx, rx) = channel();
 
         // Wrap the future to capture its result
         let wrapped_future = async move {
             let result = future.await;
-            *result_cell_clone.borrow_mut() = Some(result);
+            let _ = tx.send(result);
         };
 
         // Spawn the wrapped future
@@ -134,10 +122,7 @@ impl Executor {
         }
 
         // Extract the result
-        result_cell
-            .borrow_mut()
-            .take()
-            .expect("Future did not complete")
+        rx.recv().expect("Future did not complete")
     }
 }
 
