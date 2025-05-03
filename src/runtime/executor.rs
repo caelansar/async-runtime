@@ -1,5 +1,5 @@
 //! Executor decides who gets time on the CPU to progress and when they get it.
-//! The executor must also call Future::poll and advance the state machines to their next state. It’s a type of scheduler.
+//! The executor must also call Future::poll and advance the state machines to their next state. It's a type of scheduler.
 //! The current executor is a single-threaded implementation
 
 use std::{
@@ -73,11 +73,32 @@ impl Executor {
     }
 
     /// Block the thread until the future is ready.
-    pub fn block_on<F>(&mut self, future: F)
+    pub fn block_on<F, T>(&mut self, future: F) -> T
     where
-        F: Future<Output = ()> + 'static,
+        F: Future<Output = T> + 'static,
+        T: 'static,
     {
-        spawn(future);
+        // Create a special task ID for our main future
+        let main_id = CURRENT_EXEC.with(|e| e.next_id.fetch_add(1, Ordering::Relaxed));
+
+        // We need to keep track of the result
+        let result_cell = RefCell::new(None);
+        let result_cell = Arc::new(result_cell);
+        let result_cell_clone = result_cell.clone();
+
+        // Wrap the future to capture its result
+        let wrapped_future = async move {
+            let result = future.await;
+            *result_cell_clone.borrow_mut() = Some(result);
+        };
+
+        // Spawn the wrapped future
+        CURRENT_EXEC.with(|e| {
+            e.tasks
+                .borrow_mut()
+                .insert(main_id, Box::pin(wrapped_future));
+            e.ready_queue.lock().map(|mut q| q.push(main_id)).unwrap();
+        });
 
         let parker = Arc::new(Parker::default());
 
@@ -111,6 +132,12 @@ impl Executor {
                 break;
             }
         }
+
+        // Extract the result
+        result_cell
+            .borrow_mut()
+            .take()
+            .expect("Future did not complete")
     }
 }
 

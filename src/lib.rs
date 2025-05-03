@@ -7,9 +7,10 @@ use runtime::{executor::Executor, reactor};
 #[cfg(feature = "macro")]
 pub use rt_macro::{main, test};
 
-pub fn block_on<F>(future: F)
+pub fn block_on<F, T>(future: F) -> T
 where
-    F: std::future::Future<Output = ()> + 'static,
+    F: std::future::Future<Output = T> + 'static,
+    T: 'static,
 {
     let mut executor = init();
     executor.block_on(future)

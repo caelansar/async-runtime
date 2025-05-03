@@ -1,8 +1,10 @@
 use std::future::ready;
 
 #[cmoon::test]
-async fn macro_works() {
-    if ready(42).await != 42 {
-        unreachable!()
+async fn macro_works() -> Result<(), &'static str> {
+    if ready(42).await == 42 {
+        Ok(())
+    } else {
+        Err("wowo")
     }
 }
