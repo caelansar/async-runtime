@@ -43,28 +43,32 @@ fn test_internal(attr: TokenStream, item: TokenStream) -> Result<ItemFn> {
 fn async_block_on(attr: TokenStream, item: TokenStream) -> Result<ItemFn> {
     let mut item: ItemFn = syn::parse2(item)?;
 
-    let attr: MetaNameValue = syn::parse2(attr)?;
-
     if item.sig.asyncness.is_some() {
         item.sig.asyncness = None;
     } else {
         return Err(Error::new_spanned(item, "expected function to be async"));
     }
 
-    let worker_threads = if attr.path.is_ident("worker_threads") {
-        match attr.value {
-            Expr::Lit(ExprLit {
-                lit: Lit::Int(int), ..
-            }) => int.to_string().parse::<usize>().ok(),
-            _ => {
-                return Err(Error::new_spanned(
-                    attr.value,
-                    "expected valid integer, e.g. 2",
-                ));
-            }
-        }
-    } else {
+    let worker_threads = if attr.is_empty() {
         None
+    } else {
+        let attr: MetaNameValue = syn::parse2(attr)?;
+
+        if attr.path.is_ident("worker_threads") {
+            match attr.value {
+                Expr::Lit(ExprLit {
+                    lit: Lit::Int(int), ..
+                }) => int.to_string().parse::<usize>().ok(),
+                _ => {
+                    return Err(Error::new_spanned(
+                        attr.value,
+                        "expected valid integer, e.g. 2",
+                    ));
+                }
+            }
+        } else {
+            return Err(Error::new_spanned(attr.path, "expected `worker_threads`"));
+        }
     };
 
     let path = quote::quote! { ::cmoon };

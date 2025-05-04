@@ -65,6 +65,7 @@ fn event_loop(mut poll: Poll, wakers: Wakers) {
     }
 }
 
+#[cfg(not(test))]
 pub fn start() {
     use thread::spawn;
     let wakers = Arc::new(Mutex::new(HashMap::new()));
@@ -78,5 +79,22 @@ pub fn start() {
     };
 
     REACTOR.set(reactor).ok().expect("Reactor already running");
+    spawn(move || event_loop(poll, wakers));
+}
+
+#[cfg(test)]
+pub fn start() {
+    use thread::spawn;
+    let wakers = Arc::new(Mutex::new(HashMap::new()));
+    let poll = Poll::new().unwrap();
+    let registry = poll.registry().try_clone().unwrap();
+    let next_id = AtomicUsize::new(1);
+    let reactor = Reactor {
+        wakers: wakers.clone(),
+        registry,
+        next_id,
+    };
+
+    let _ = REACTOR.set(reactor);
     spawn(move || event_loop(poll, wakers));
 }

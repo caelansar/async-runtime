@@ -8,3 +8,12 @@ async fn macro_works() -> Result<(), &'static str> {
         Err("wowo")
     }
 }
+
+#[cmoon::test]
+async fn macro_works_with_no_threads() -> Result<(), &'static str> {
+    if ready(42).await == 42 {
+        Ok(())
+    } else {
+        Err("wowo")
+    }
+}
