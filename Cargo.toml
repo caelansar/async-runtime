@@ -21,5 +21,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+async-task = "4.7.1"
+crossbeam-deque = "0.8.6"
 mio = { version = "1.0.3", features = ["net", "os-poll"] }
+num_cpus = "1.16.0"
+once_cell = "1.21.3"
 rt_macro = { path = "rt_macro", optional = true }
+
+[dev-dependencies]
+futures = "0.3.31"

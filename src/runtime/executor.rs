@@ -1,144 +1,176 @@
-//! Executor decides who gets time on the CPU to progress and when they get it.
-//! The executor must also call Future::poll and advance the state machines to their next state. It's a type of scheduler.
-//! The current executor is a single-threaded implementation
+//! Multi-threaded executor implementation using async-task.
+//! This executor can run futures concurrently across multiple threads.
 
 use std::{
-    cell::RefCell,
-    collections::HashMap,
     future::Future,
-    pin::Pin,
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-        mpsc::channel,
+        Arc,
+        atomic::{AtomicBool, Ordering},
     },
-    task::{Context, Poll, Wake, Waker},
     thread,
 };
 
+use async_task::Runnable;
+use crossbeam_deque::{Injector, Steal, Worker};
+use once_cell::sync::Lazy;
+
 use crate::parker::Parker;
 
-type Task = Pin<Box<dyn Future<Output = ()>>>;
+// Re-export Task type for public use
+pub use async_task::Task;
 
-thread_local! {
-    static CURRENT_EXEC: ExecutorCore = ExecutorCore::default();
+// Global task queue shared across all worker threads
+static GLOBAL_QUEUE: Lazy<Injector<Runnable>> = Lazy::new(|| Injector::new());
+
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// Multi-threaded executor for running async tasks
+pub struct Executor {
+    num_threads: usize,
+    handles: Vec<thread::JoinHandle<()>>,
+    running: Arc<AtomicBool>,
 }
-
-#[derive(Default)]
-struct ExecutorCore {
-    tasks: RefCell<HashMap<usize, Task>>,
-    ready_queue: Arc<Mutex<Vec<usize>>>,
-    next_id: AtomicUsize,
-}
-
-pub struct Executor {}
 
 impl Executor {
+    /// Create a new executor with the specified number of worker threads.
     pub fn new() -> Self {
-        Self {}
+        Self::with_threads(num_cpus::get())
     }
 
-    fn pop_ready(&self) -> Option<usize> {
-        CURRENT_EXEC.with(|q| q.ready_queue.lock().map(|mut q| q.pop()).unwrap())
+    /// Create a new executor with the specified number of worker threads.
+    pub fn with_threads(num_threads: usize) -> Self {
+        let running = Arc::new(AtomicBool::new(true));
+        let handles = Vec::new();
+
+        Self {
+            num_threads,
+            handles,
+            running,
+        }
     }
 
-    fn get_future(&self, id: usize) -> Option<Task> {
-        CURRENT_EXEC.with(|q| q.tasks.borrow_mut().remove(&id))
+    /// Start worker threads
+    pub fn start(&mut self) {
+        if !self.handles.is_empty() {
+            return;
+        }
+
+        let running = self.running.clone();
+
+        for i in 0..self.num_threads {
+            let local = Worker::new_fifo();
+            let running = running.clone();
+
+            let handle = thread::Builder::new()
+                .name(format!("executor-{}", i))
+                .spawn(move || {
+                    Self::worker_loop(i, local, running);
+                })
+                .expect("Failed to spawn worker thread");
+
+            self.handles.push(handle);
+        }
     }
 
-    fn get_waker(&self, id: usize, parker: Arc<Parker>) -> Arc<MyWaker> {
-        Arc::new(MyWaker {
-            id,
-            parker,
-            ready_queue: CURRENT_EXEC.with(|q| q.ready_queue.clone()),
-        })
-    }
+    /// The main worker loop that steals tasks and executes them
+    fn worker_loop(id: usize, local: Worker<Runnable>, running: Arc<AtomicBool>) {
+        println!("Worker thread {} started", id);
 
-    fn insert_task(&self, id: usize, task: Task) {
-        CURRENT_EXEC.with(|q| q.tasks.borrow_mut().insert(id, task));
-    }
-
-    fn task_count(&self) -> usize {
-        CURRENT_EXEC.with(|q| q.tasks.borrow().len())
-    }
-
-    /// Block the thread until the future is ready.
-    pub fn block_on<F, T>(&mut self, future: F) -> T
-    where
-        F: Future<Output = T> + 'static,
-        T: 'static,
-    {
-        // Create a special task ID for our main future
-        let main_id = CURRENT_EXEC.with(|e| e.next_id.fetch_add(1, Ordering::Relaxed));
-
-        // We need to keep track of the result
-        let (tx, rx) = channel();
-
-        // Wrap the future to capture its result
-        let wrapped_future = async move {
-            let result = future.await;
-            let _ = tx.send(result);
-        };
-
-        // Spawn the wrapped future
-        CURRENT_EXEC.with(|e| {
-            e.tasks
-                .borrow_mut()
-                .insert(main_id, Box::pin(wrapped_future));
-            e.ready_queue.lock().map(|mut q| q.push(main_id)).unwrap();
-        });
-
-        let parker = Arc::new(Parker::default());
-
-        loop {
-            while let Some(id) = self.pop_ready() {
-                println!("pop_ready: {id}");
-
-                let mut future = match self.get_future(id) {
-                    Some(f) => f,
-                    // guard against false wakeups
-                    None => continue,
-                };
-
-                let waker: Waker = self.get_waker(id, parker.clone()).into();
-                let mut cx = Context::from_waker(&waker);
-
-                match future.as_mut().poll(&mut cx) {
-                    Poll::Pending => self.insert_task(id, future),
-                    Poll::Ready(_) => continue,
-                }
+        while running.load(Ordering::SeqCst) {
+            // First check the local queue
+            if let Some(runnable) = local.pop() {
+                runnable.run();
+                continue;
             }
 
-            let task_count = self.task_count();
-            let name = thread::current().name().unwrap_or_default().to_string();
+            // Then try to steal from the global queue
+            match GLOBAL_QUEUE.steal_batch_and_pop(&local) {
+                Steal::Success(runnable) => {
+                    runnable.run();
+                }
+                Steal::Empty => {
+                    // If global queue is empty, yield to avoid spinning too aggressively
+                    thread::yield_now();
 
-            if task_count > 0 {
-                println!("{name}: {task_count} pending tasks. Sleep until notified.");
-                parker.park();
-            } else {
-                println!("{name}: All tasks are finished");
-                break;
+                    // Check if we should shut down
+                    if SHUTDOWN.load(Ordering::SeqCst) && GLOBAL_QUEUE.is_empty() {
+                        break;
+                    }
+
+                    // Small backoff to avoid burning CPU
+                    thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Steal::Retry => continue,
             }
         }
 
-        // Extract the result
-        rx.recv().expect("Future did not complete")
+        println!("Worker thread {} stopped", id);
+    }
+
+    /// Spawn a future onto the executor
+    pub fn spawn<F, T>(future: F) -> Task<T>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let (runnable, task) = async_task::spawn(future, |runnable| {
+            GLOBAL_QUEUE.push(runnable);
+        });
+
+        // Schedule the task immediately
+        runnable.schedule();
+
+        task
+    }
+
+    /// Block the current thread until the future completes
+    pub fn block_on<F, T>(&mut self, future: F) -> T
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        // Make sure worker threads are started
+        self.start();
+
+        let parker = Arc::new(Parker::default());
+        let unparker = parker.clone();
+
+        // Create a oneshot channel to get the result
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // Wrap the future to store the result
+        let wrapped_future = async move {
+            let result = future.await;
+            let _ = sender.send(result);
+            unparker.unpark();
+        };
+
+        // Spawn the wrapped future on the executor
+        Self::spawn(wrapped_future).detach();
+
+        // Wait for the future to complete
+        parker.park();
+
+        // Return the result
+        receiver.recv().expect("Failed to receive result")
+    }
+
+    /// Clean up the executor and wait for all worker threads to finish
+    pub fn shutdown(&mut self) {
+        // Signal shutdown
+        SHUTDOWN.store(true, Ordering::SeqCst);
+        self.running.store(false, Ordering::SeqCst);
+
+        // Wait for all threads to complete
+        let handles = std::mem::take(&mut self.handles);
+        for handle in handles {
+            let _ = handle.join();
+        }
     }
 }
 
-#[derive(Clone)]
-pub struct MyWaker {
-    parker: Arc<Parker>,
-    id: usize,
-    ready_queue: Arc<Mutex<Vec<usize>>>,
-}
-
-impl Wake for MyWaker {
-    fn wake(self: Arc<Self>) {
-        self.ready_queue
-            .lock()
-            .map(|mut q| q.push(self.id))
-            .unwrap();
-        self.parker.unpark();
+impl Drop for Executor {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
     }
 }
