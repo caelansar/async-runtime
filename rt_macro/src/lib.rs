@@ -1,10 +1,9 @@
 use std::iter::FromIterator;
-use std::str::FromStr;
 
 use proc_macro2::TokenStream;
 use quote::ToTokens;
 use syn::spanned::Spanned;
-use syn::{Error, Expr, ExprLit, ExprPath, ItemFn, Lit, MetaNameValue, Result};
+use syn::{Error, Expr, ExprLit, ItemFn, Lit, MetaNameValue, Result};
 
 #[proc_macro_attribute]
 pub fn main(
@@ -44,50 +43,55 @@ fn test_internal(attr: TokenStream, item: TokenStream) -> Result<ItemFn> {
 fn async_block_on(attr: TokenStream, item: TokenStream) -> Result<ItemFn> {
     let mut item: ItemFn = syn::parse2(item)?;
 
+    let attr: MetaNameValue = syn::parse2(attr)?;
+
     if item.sig.asyncness.is_some() {
         item.sig.asyncness = None;
     } else {
         return Err(Error::new_spanned(item, "expected function to be async"));
     }
 
-    let path = if attr.is_empty() {
-        quote::quote! { ::cmoon }
-    } else {
-        let attr: MetaNameValue = syn::parse2(attr)?;
-
-        if attr.path.is_ident("crate") {
-            match attr.value {
-                Expr::Lit(ExprLit {
-                    attrs,
-                    lit: Lit::Str(str),
-                }) if attrs.is_empty() => TokenStream::from_str(&str.value())?,
-                Expr::Path(ExprPath {
-                    attrs,
-                    qself: None,
-                    path,
-                }) if attrs.is_empty() => path.to_token_stream(),
-                _ => {
-                    return Err(Error::new_spanned(
-                        attr.value,
-                        "expected valid path, e.g. `::package_name`",
-                    ));
-                }
+    let worker_threads = if attr.path.is_ident("worker_threads") {
+        match attr.value {
+            Expr::Lit(ExprLit {
+                lit: Lit::Int(int), ..
+            }) => int.to_string().parse::<usize>().ok(),
+            _ => {
+                return Err(Error::new_spanned(
+                    attr.value,
+                    "expected valid integer, e.g. 2",
+                ));
             }
-        } else {
-            return Err(Error::new_spanned(attr.path, "expected `crate`"));
         }
+    } else {
+        None
     };
+
+    let path = quote::quote! { ::cmoon };
 
     let span = item.span();
     let block = item.block;
-    item.block = syn::parse_quote_spanned! {
-        span =>
-        {
-            #path::block_on(async {
-                #block
-            })
-        }
-    };
+
+    if let Some(worker_threads) = worker_threads {
+        item.block = syn::parse_quote_spanned! {
+            span =>
+            {
+                let mut executor = ::cmoon::init_with_threads(#worker_threads);
+                executor.block_on(async {
+                    #block
+                })
+            }
+        };
+    } else {
+        item.block = syn::parse_quote_spanned! {
+            span =>
+            {
+                #path::block_on(async {
+                    #block
+                })
+            }
+        };
+    }
 
     Ok(item)
 }
