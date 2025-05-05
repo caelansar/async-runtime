@@ -12,7 +12,7 @@ The project is organized as a Cargo workspace with multiple crates:
 
 ## Features
 
-- **Custom Executor**: A single-threaded executor that schedules and executes async tasks
+- **Multi-threaded Executor**: A work-stealing executor that schedules and executes async tasks
 - **Event-driven Reactor**: A non-blocking I/O implementation using `mio` for efficient I/O operations
 - **Procedural Macros**: Macros to simplify using async functions with `#[cmoon::main]` and `#[cmoon::test]` attributes
 - **Delay Server**: A sample HTTP server that introduces artificial delays in responses
@@ -98,14 +98,24 @@ async fn main() {
 }
 ```
 
+Manually specify the number of threads:
+```rust
+#[cmoon::main(worker_threads = 1)]
+async fn main() {
+    // Your async code here
+    let result = cmoon::io::http::Http::get("http://localhost:8080/100/hello").await;
+    println!("Result: {}", result);
+}
+```
+
 ## Implementation Details
 
 ### Executor
 
-The executor is responsible for scheduling and executing async tasks. It manages:
-- Task scheduling and waking
+The executor efficiently schedules and executes async tasks across multiple threads:
+- Thread pool with work-stealing for optimal CPU utilization
 - Task execution through polling
-- Efficient thread parking when no tasks are ready to progress
+- Support for configurable number of worker threads
 
 ### Reactor
 
