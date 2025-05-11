@@ -119,7 +119,7 @@ The executor efficiently schedules and executes async tasks across multiple thre
 
 ### Reactor
 
-The reactor handles I/O events using `mio` to provide non-blocking I/O capabilities:
+The reactor handles I/O events using [mio](https://github.com/tokio-rs/mio) to provide non-blocking I/O capabilities:
 - Registering I/O resources for event notifications
 - Waking tasks when I/O operations can make progress
 - Managing wakers for suspended futures
@@ -130,6 +130,14 @@ The `Http` module demonstrates how to implement async I/O with the custom runtim
 - Non-blocking TCP connections
 - Future-based API for HTTP requests
 - Integration with the reactor for efficient I/O polling
+
+### Task
+
+These root futures are called tasks, and they are the only point of contact between the executor and the futures tree. 
+The executor calls poll on the task, and from that point forward the code of each contained future must figure out which 
+inner future(s) to poll in response, all the way down to the relevant leaf.
+
+In this project, we use [async-task](https://github.com/smol-rs/async-task) directly
 
 ## License
 
