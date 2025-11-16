@@ -7,6 +7,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    task::{Context, Poll, Wake},
     thread,
 };
 
@@ -124,35 +125,32 @@ impl Executor {
     }
 
     /// Block the current thread until the future completes
+    ///
+    /// This method does not require Send because the future runs on the current thread.
     pub fn block_on<F, T>(&mut self, future: F) -> T
     where
-        F: Future<Output = T> + Send + 'static,
-        T: Send + 'static,
+        F: Future<Output = T>,
     {
         // Make sure worker threads are started
         self.start();
 
+        // Pin the future on the stack
+        let mut future = Box::pin(future);
+
         let parker = Arc::new(Parker::default());
-        let unparker = parker.clone();
+        let waker = std::task::Waker::from(parker.clone());
+        let mut context = Context::from_waker(&waker);
 
-        // Create a oneshot channel to get the result
-        let (sender, receiver) = std::sync::mpsc::channel();
-
-        // Wrap the future to store the result
-        let wrapped_future = async move {
-            let result = future.await;
-            let _ = sender.send(result);
-            unparker.unpark();
-        };
-
-        // Spawn the wrapped future on the executor
-        Self::spawn(wrapped_future).detach();
-
-        // Wait for the future to complete
-        parker.park();
-
-        // Return the result
-        receiver.recv().expect("Failed to receive result")
+        // Poll the future until completion
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(result) => return result,
+                Poll::Pending => {
+                    // Park the current thread until woken up
+                    parker.park();
+                }
+            }
+        }
     }
 
     /// Clean up the executor and wait for all worker threads to finish
@@ -172,5 +170,16 @@ impl Executor {
 impl Drop for Executor {
     fn drop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
+    }
+}
+
+// Implement Wake for Parker to allow it to be used as a Waker
+impl Wake for Parker {
+    fn wake(self: Arc<Self>) {
+        self.unpark();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.unpark();
     }
 }

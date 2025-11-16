@@ -10,10 +10,11 @@ use runtime::{executor::Executor, reactor};
 pub use rt_macro::{main, test};
 
 /// Block the current thread until the future completes
+///
+/// This function does not require Send because the future runs on the current thread.
 pub fn block_on<F, T>(future: F) -> T
 where
-    F: Future<Output = T> + Send + 'static,
-    T: Send + 'static,
+    F: Future<Output = T>,
 {
     let mut executor = init();
     executor.block_on(future)
